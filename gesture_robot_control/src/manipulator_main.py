@@ -1,3 +1,5 @@
+# main.py - Placeholder 
+
 import cv2
 import time
 import sys
@@ -9,31 +11,39 @@ if src_dir not in sys.path:
     sys.path.append(src_dir)
 
 from multimodal.gesture_control import GestureControl
-from simulation.wheeled_robot_sim import WheeledRobotSimulator
+from simulation.robot_sim import RobotSimulator  # updated import
+
+# removed unused imports
+# import speech_recognition as sr
+# from multimodal.config import CONFIG
+# from multimodal.gesture_module import GestureRecognizer
+# from multimodal.audio_module import AudioToneRecognizer
+# from multimodal.emotion_module import EmotionRecognizer
+# from multimodal.llm_integration import LLMIntegrator
 
 def main():
-    # initialize components with wheeled robot mode
-    gesture_control = GestureControl(control_mode="wheeled")
-    robot_sim = WheeledRobotSimulator()
+    # initialize components
+    gesture_control = GestureControl()
+    robot_sim = RobotSimulator()  # using our new simulator
     
     # setup video capture
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
-    print("Starting wheeled robot gesture control system...")
-    print("Controls:")
-    print("- point: drive robot towards pointed location")
-    print("- fist: rotate the robot (position determines direction)")
-    print("- open palm + wave: toggle stop/go")
-    print("Press 'q' to quit")
+    print("starting gesture control system...")
+    print("controls:")
+    print("- point: control x,y position")
+    print("- point + circle: control z height")
+    print("- open palm + wave: toggle gripper")
+    print("press 'q' to quit")
     
     try:
         while True:
             # capture frame
             ret, frame = cap.read()
             if not ret:
-                print("Failed to grab frame")
+                print("failed to grab frame")
                 break
                 
             # flip frame horizontally for more intuitive control
@@ -44,10 +54,11 @@ def main():
             
             # execute command if one was generated
             if command:
+                print(f"executing command: {command}")
                 robot_sim.execute_command(command)
             
             # display frame
-            cv2.imshow('Wheeled Robot Gesture Control', frame)
+            cv2.imshow('gesture control', frame)
             
             # break loop on 'q' press
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -60,7 +71,7 @@ def main():
         # cleanup
         cap.release()
         cv2.destroyAllWindows()
-        robot_sim.close()
+        robot_sim.close()  # close the robot simulator
         
 if __name__ == "__main__":
     main() 
