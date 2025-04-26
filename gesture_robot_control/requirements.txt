@@ -1,0 +1,25 @@
+# Core dependencies
+opencv-python
+mediapipe
+roboticstoolbox-python
+numpy
+scikit-learn
+pyyaml
+matplotlib
+jupyter
+pytest
+websockets  # for swift simulator
+asyncio  # for event loop handling
+nest_asyncio  # for handling nested event loops
+vpython  # for 3d visualization
+
+# Development dependencies
+pytest-cov
+black
+isort
+mypy
+types-PyYAML
+
+# Optional dependencies (for visualization and debugging)
+ipython
+tqdm 

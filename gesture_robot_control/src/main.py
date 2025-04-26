@@ -11,7 +11,7 @@ if src_dir not in sys.path:
     sys.path.append(src_dir)
 
 from multimodal.gesture_control import GestureControl
-from simulation.test_sim import RobotSimulator  # you'll need to implement this
+from simulation.robot_sim import RobotSimulator  # updated import
 
 # removed unused imports
 # import speech_recognition as sr
@@ -24,7 +24,7 @@ from simulation.test_sim import RobotSimulator  # you'll need to implement this
 def main():
     # initialize components
     gesture_control = GestureControl()
-    robot_sim = RobotSimulator()  # or your real robot interface
+    robot_sim = RobotSimulator()  # using our new simulator
     
     # setup video capture
     cap = cv2.VideoCapture(0)
@@ -71,6 +71,7 @@ def main():
         # cleanup
         cap.release()
         cv2.destroyAllWindows()
+        robot_sim.close()  # close the robot simulator
         
 if __name__ == "__main__":
     main() 
