@@ -32,7 +32,25 @@ term_project/
 └── README.md                    # This file
 ```
 
-- gesture_robot_control: contains the code for the gesture robot control project
-- articles: contains articles and papers related to the project
-- report: contains the report for the project
+### Instructions
 
+1. Clone the repository
+
+```bash
+git clone https://github.com/yuckyman/cs7075_termproject.git
+cd cs7075_termproject/gesture_robot_control
+```
+
+2. Set up the environment and install the dependencies
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+3. Run the application
+
+```bash
+python src/main.py
+```
