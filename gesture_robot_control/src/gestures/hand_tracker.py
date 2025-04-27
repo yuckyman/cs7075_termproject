@@ -6,7 +6,7 @@ from collections import deque
 import time
 
 class HandTracker:
-    def __init__(self, max_hands=1, min_detection_confidence=0.7,
+    def __init__(self, max_hands=2, min_detection_confidence=0.7,
                  motion_history_size=20):
         """
         initialize hand tracking with mediapipe
@@ -24,16 +24,28 @@ class HandTracker:
             min_detection_confidence=min_detection_confidence
         )
         
-        # motion tracking
+        # motion tracking for each hand
         self.motion_history_size = motion_history_size
-        self.index_tip_history = deque(maxlen=motion_history_size)
-        self.palm_history = deque(maxlen=motion_history_size)
-        self.fingertips_history = deque(maxlen=motion_history_size)  # for wave detection
-        self.palm_base_history = deque(maxlen=motion_history_size)   # for wave detection
+        self.hand_histories = {
+            'left': {
+                'index_tip': deque(maxlen=motion_history_size),
+                'palm': deque(maxlen=motion_history_size),
+                'fingertips': deque(maxlen=motion_history_size),
+                'palm_base': deque(maxlen=motion_history_size),
+                'is_pointing': False,
+                'current_dynamic_gesture': None
+            },
+            'right': {
+                'index_tip': deque(maxlen=motion_history_size),
+                'palm': deque(maxlen=motion_history_size),
+                'fingertips': deque(maxlen=motion_history_size),
+                'palm_base': deque(maxlen=motion_history_size),
+                'is_pointing': False,
+                'current_dynamic_gesture': None
+            }
+        }
         self.last_gesture_time = time.time()
         self.gesture_cooldown = 1.0  # seconds between dynamic gestures
-        self.is_pointing = False  # track pointing state
-        self.current_dynamic_gesture = None  # track dynamic gestures separately
         
     def find_hands(self, frame: np.ndarray, draw=True) -> Tuple[np.ndarray, List]:
         """
@@ -46,6 +58,9 @@ class HandTracker:
         returns:
             tuple: (processed frame, list of hand landmarks)
         """
+        # store frame width for hand side detection
+        h, w, _ = frame.shape
+        self.frame_width = w
         # convert to rgb for mediapipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         self.results = self.hands.process(rgb_frame)
@@ -68,35 +83,39 @@ class HandTracker:
                     landmarks.append((cx, cy))
                 all_hands.append(landmarks)
                 
+                # determine hand side (left/right)
+                hand_side = "left" if hand_landmarks.landmark[0].x < 0.5 else "right"
+                
                 # detect if we're pointing
-                self.is_pointing = self._is_pointing(landmarks)
+                self.hand_histories[hand_side]['is_pointing'] = self._is_pointing(landmarks)
                 
                 # update histories based on current gesture
-                if self.is_pointing:
+                if self.hand_histories[hand_side]['is_pointing']:
                     if landmarks:
-                        self.index_tip_history.append(landmarks[8])  # index fingertip
+                        self.hand_histories[hand_side]['index_tip'].append(landmarks[8])  # index fingertip
                         palm_center = np.mean([landmarks[0], landmarks[5], landmarks[17]], axis=0)
-                        self.palm_history.append(palm_center)
+                        self.hand_histories[hand_side]['palm'].append(palm_center)
                 else:
                     # For wave detection, track all fingertips and palm base
                     fingertips = [landmarks[tip] for tip in [4, 8, 12, 16, 20]]  # thumb to pinky tips
                     palm_base = landmarks[0]  # wrist point
-                    self.fingertips_history.append(fingertips)
-                    self.palm_base_history.append(palm_base)
+                    self.hand_histories[hand_side]['fingertips'].append(fingertips)
+                    self.hand_histories[hand_side]['palm_base'].append(palm_base)
                     
                     # Clear pointing-related history
-                    self.index_tip_history.clear()
-                    self.palm_history.clear()
-                    self.current_dynamic_gesture = None
+                    self.hand_histories[hand_side]['index_tip'].clear()
+                    self.hand_histories[hand_side]['palm'].clear()
+                    self.hand_histories[hand_side]['current_dynamic_gesture'] = None
                 
         else:
             # no hands detected, clear all histories
-            self.is_pointing = False
-            self.index_tip_history.clear()
-            self.palm_history.clear()
-            self.fingertips_history.clear()
-            self.palm_base_history.clear()
-            self.current_dynamic_gesture = None
+            for hand in self.hand_histories.values():
+                hand['is_pointing'] = False
+                hand['index_tip'].clear()
+                hand['palm'].clear()
+                hand['fingertips'].clear()
+                hand['palm_base'].clear()
+                hand['current_dynamic_gesture'] = None
             
         return frame, all_hands
     
@@ -113,28 +132,32 @@ class HandTracker:
         if not landmarks:
             return None
             
+        # determine hand side based on pixel x coordinate relative to frame width
+        hand_side = "left" if landmarks[0][0] < self.frame_width / 2 else "right"
+        
         # detect static gesture
         static_gesture = self._detect_static_gesture(landmarks)
         
-        # check for dynamic gestures based on current static gesture
-        if self.is_pointing:
-            self.current_dynamic_gesture = self._detect_dynamic_gesture()
-            if self.current_dynamic_gesture:
-                return f"point+{self.current_dynamic_gesture}"
-        elif static_gesture == "open_palm":
-            # check for wave when hand is open
-            if self._detect_palm_wave():
-                return "open_palm+wave"
+        # for right hand, detect velocity from fist-to-palm transition
+        if hand_side == "right":
+            velocity = self._detect_fist_to_palm(hand_side)
+            if velocity > 0:
+                return f"velocity_{velocity:.2f}"
+        
+        # for left hand, detect heading from pointer angle
+        elif hand_side == "left":
+            angle = self._calculate_pointer_angle(landmarks)
+            return f"heading_{angle:.2f}"
         
         return static_gesture
     
-    def _detect_palm_wave(self) -> bool:
+    def _detect_palm_wave(self, hand_side: str) -> bool:
         """Detect waving motion in open palm gesture"""
-        if len(self.fingertips_history) < self.motion_history_size:
+        if len(self.hand_histories[hand_side]['fingertips']) < self.motion_history_size:
             return False
             
         # Check if palm base is relatively stable
-        palm_positions = np.array(list(self.palm_base_history))
+        palm_positions = np.array(list(self.hand_histories[hand_side]['palm_base']))
         palm_motion = np.std(palm_positions, axis=0)
         if np.mean(palm_motion) > 30:  # palm moving too much
             return False
@@ -145,7 +168,7 @@ class HandTracker:
         prev_direction = None
         
         # Convert history to numpy array for easier calculations
-        fingertips_array = np.array(list(self.fingertips_history))
+        fingertips_array = np.array(list(self.hand_histories[hand_side]['fingertips']))
         
         # Look at vertical motion of each fingertip
         for finger_idx in range(5):  # 5 fingers
@@ -217,22 +240,25 @@ class HandTracker:
             'pinky': np.linalg.norm(np.array(pinky_tip) - palm_center)
         }
         
+        # determine hand side based on pixel x coordinate relative to frame width
+        hand_side = "left" if landmarks[0][0] < self.frame_width / 2 else "right"
+        
         # adjusted thresholds to match _is_pointing
         if all(d < 120 for d in distances.values()):
             return "fist"
         elif all(d > 120 for d in distances.values()):
             return "open_palm"
-        elif self.is_pointing:
+        elif self.hand_histories[hand_side]['is_pointing']:
             return "point"
         elif distances['thumb'] > 120 and distances['pinky'] > 120:
             return "hang_loose"
         else:
             return "unknown"
     
-    def _detect_dynamic_gesture(self) -> Optional[str]:
+    def _detect_dynamic_gesture(self, hand_side: str) -> Optional[str]:
         """detect dynamic gestures based on motion history"""
         # need enough history for dynamic gestures
-        if len(self.index_tip_history) < self.motion_history_size:
+        if len(self.hand_histories[hand_side]['index_tip']) < self.motion_history_size:
             return None
             
         # check cooldown
@@ -241,8 +267,8 @@ class HandTracker:
             return None
             
         # convert history to numpy arrays for easier math
-        index_positions = np.array(list(self.index_tip_history))
-        palm_positions = np.array(list(self.palm_history))
+        index_positions = np.array(list(self.hand_histories[hand_side]['index_tip']))
+        palm_positions = np.array(list(self.hand_histories[hand_side]['palm']))
         
         # compute motion metrics
         index_motion = np.diff(index_positions, axis=0)
@@ -323,14 +349,50 @@ class HandTracker:
             )
             
         # draw motion trail whenever pointing, regardless of dynamic gestures
-        if self.is_pointing and len(self.index_tip_history) > 1:
-            points = np.array(list(self.index_tip_history))
-            for i in range(1, len(points)):
-                thickness = int((i / len(points)) * 4) + 1
-                cv2.line(frame, 
-                        tuple(points[i-1]), 
-                        tuple(points[i]),
-                        (0, 0, 255),
-                        thickness)
+        for hand, history in self.hand_histories.items():
+            if history['is_pointing'] and len(history['index_tip']) > 1:
+                points = np.array(list(history['index_tip']))
+                for i in range(1, len(points)):
+                    thickness = int((i / len(points)) * 4) + 1
+                    cv2.line(frame, 
+                            tuple(points[i-1]), 
+                            tuple(points[i]),
+                            (0, 0, 255),
+                            thickness)
                 
         return frame 
+
+    def _calculate_pointer_angle(self, landmarks: List[Tuple[int, int]]) -> float:
+        """calculate the angle of the pointer finger relative to vertical"""
+        # get wrist and index finger tip
+        wrist = landmarks[0]
+        index_tip = landmarks[8]
+        
+        # calculate vector from wrist to index tip
+        dx = index_tip[0] - wrist[0]
+        dy = index_tip[1] - wrist[1]
+        
+        # calculate angle in radians (-pi to pi)
+        angle = np.arctan2(dx, -dy)  # negative dy because y increases downward
+        
+        return angle
+
+    def _detect_fist_to_palm(self, hand_side: str) -> float:
+        """detect transition from fist to palm and return velocity (0-1)"""
+        if len(self.hand_histories[hand_side]['fingertips']) < self.motion_history_size:
+            return 0.0
+        
+        # get current fingertip positions
+        current_fingertips = self.hand_histories[hand_side]['fingertips'][-1]
+        palm_base = self.hand_histories[hand_side]['palm_base'][-1]
+        
+        # calculate average distance from palm base to fingertips
+        distances = [np.linalg.norm(np.array(tip) - np.array(palm_base)) for tip in current_fingertips]
+        avg_distance = np.mean(distances)
+        
+        # normalize to 0-1 range (adjust these thresholds based on testing)
+        min_dist = 50  # minimum distance for closed fist
+        max_dist = 150  # maximum distance for open palm
+        velocity = np.clip((avg_distance - min_dist) / (max_dist - min_dist), 0.0, 1.0)
+        
+        return velocity 
