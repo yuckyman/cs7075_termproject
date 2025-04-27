@@ -44,8 +44,8 @@ class HandTracker:
                 'current_dynamic_gesture': None
             }
         }
-        self.last_gesture_time = time.time()
-        self.gesture_cooldown = 1.0  # seconds between dynamic gestures
+        self.last_dynamic_gesture_time = time.time()
+        self.dynamic_gesture_cooldown = 1.0  # seconds between dynamic gestures (waves, circles, etc)
         
     def find_hands(self, frame: np.ndarray, draw=True) -> Tuple[np.ndarray, List]:
         """
@@ -137,6 +137,9 @@ class HandTracker:
         
         # detect static gesture
         static_gesture = self._detect_static_gesture(landmarks)
+        # prioritize static pinch gesture for manual override
+        if static_gesture == "pinch":
+            return static_gesture
         
         # for right hand, detect velocity from fist-to-palm transition
         if hand_side == "right":
@@ -220,40 +223,55 @@ class HandTracker:
                 all(d < 120 for k, d in distances.items() if k != 'index'))
     
     def _detect_static_gesture(self, landmarks: List[Tuple[int, int]]) -> str:
-        """detect static gestures"""
+        """Detect static hand gestures based on landmark positions"""
+        if not landmarks:
+            return None
+            
         # get key finger states
         thumb_tip = landmarks[4]
         index_tip = landmarks[8]
         middle_tip = landmarks[12]
         ring_tip = landmarks[16]
         pinky_tip = landmarks[20]
+        wrist = landmarks[0]
         
-        # get palm center
-        palm_center = np.mean([landmarks[0], landmarks[5], landmarks[17]], axis=0)
+        # calculate finger distances from wrist
+        thumb_dist = np.linalg.norm(np.array(thumb_tip) - np.array(wrist))
+        index_dist = np.linalg.norm(np.array(index_tip) - np.array(wrist))
+        middle_dist = np.linalg.norm(np.array(middle_tip) - np.array(wrist))
+        ring_dist = np.linalg.norm(np.array(ring_tip) - np.array(wrist))
+        pinky_dist = np.linalg.norm(np.array(pinky_tip) - np.array(wrist))
         
-        # compute distances
-        distances = {
-            'thumb': np.linalg.norm(np.array(thumb_tip) - palm_center),
-            'index': np.linalg.norm(np.array(index_tip) - palm_center),
-            'middle': np.linalg.norm(np.array(middle_tip) - palm_center),
-            'ring': np.linalg.norm(np.array(ring_tip) - palm_center),
-            'pinky': np.linalg.norm(np.array(pinky_tip) - palm_center)
-        }
+        # check if hand is flipped (thumb on right side)
+        thumb_right = thumb_tip[0] > wrist[0]  # thumb x > wrist x means thumb is on right side
         
         # determine hand side based on pixel x coordinate relative to frame width
         hand_side = "left" if landmarks[0][0] < self.frame_width / 2 else "right"
         
-        # adjusted thresholds to match _is_pointing
-        if all(d < 120 for d in distances.values()):
-            return "fist"
-        elif all(d > 120 for d in distances.values()):
+        # check for thumbs down (thumb extended down, other fingers closed)
+        if (thumb_dist > 0.8 and  # thumb extended
+            index_dist < 0.5 and  # other fingers closed
+            middle_dist < 0.5 and
+            ring_dist < 0.5 and
+            pinky_dist < 0.5):
+            return "thumbs_down"
+
+        # check for pinch (thumb and index close)
+        if (np.linalg.norm(np.array(thumb_tip) - np.array(index_tip)) < 50 and
+            middle_dist > 0.7 and ring_dist > 0.7 and pinky_dist > 0.7):
+            return "pinch"
+
+        # check for open palm (all fingers extended)
+        if (index_dist > 0.8 and middle_dist > 0.8 and 
+            ring_dist > 0.8 and pinky_dist > 0.8):
             return "open_palm"
-        elif self.hand_histories[hand_side]['is_pointing']:
-            return "point"
-        elif distances['thumb'] > 120 and distances['pinky'] > 120:
-            return "hang_loose"
-        else:
-            return "unknown"
+            
+        # check for fist (all fingers closed)
+        if (index_dist < 0.5 and middle_dist < 0.5 and 
+            ring_dist < 0.5 and pinky_dist < 0.5):
+            return "fist"
+
+        return None
     
     def _detect_dynamic_gesture(self, hand_side: str) -> Optional[str]:
         """detect dynamic gestures based on motion history"""
@@ -263,7 +281,7 @@ class HandTracker:
             
         # check cooldown
         current_time = time.time()
-        if current_time - self.last_gesture_time < self.gesture_cooldown:
+        if current_time - self.last_dynamic_gesture_time < self.dynamic_gesture_cooldown:
             return None
             
         # convert history to numpy arrays for easier math
@@ -281,17 +299,17 @@ class HandTracker:
         if total_distance > 150:  # reduced from 200 - more sensitive to general motion
             # check for swipe gestures
             if abs(x_motion) > 100 and abs(y_motion) < 120:  # reduced horizontal requirement, increased vertical tolerance
-                self.last_gesture_time = current_time
+                self.last_dynamic_gesture_time = current_time
                 return "swipe_right" if x_motion > 0 else "swipe_left"
                 
             # check for circle gesture
             elif self._is_circular_motion(index_positions):
-                self.last_gesture_time = current_time
+                self.last_dynamic_gesture_time = current_time
                 return "circle"
                 
             # check for wave gesture
             elif self._is_wave_motion(index_positions):
-                self.last_gesture_time = current_time
+                self.last_dynamic_gesture_time = current_time
                 return "wave"
                 
         return None

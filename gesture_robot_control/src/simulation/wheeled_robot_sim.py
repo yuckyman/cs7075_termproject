@@ -3,9 +3,11 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle
 import time
 from matplotlib.animation import FuncAnimation
+import cv2
+from metrics.gesture_latency_logger import GestureLatencyLogger
 
 class WheeledRobotSimulator:
-    def __init__(self):
+    def __init__(self, roomba_mode=False):
         # Set up the simulation environment
         self.fig, self.ax = plt.subplots(figsize=(10, 8))
         self.ax.set_xlim(-5, 5)
@@ -79,6 +81,38 @@ class WheeledRobotSimulator:
         plt.ion()
         plt.show()
         
+        # initialize robot state
+        self.position = np.array([0.5, 0.5])  # x, y position (normalized coordinates)
+        self.angle = 0.0  # current angle in radians
+        self.robot_speed = 0.0  # current speed (0-1)
+        self.robot_angular_vel = 0.0  # current angular velocity
+        
+        # roomba mode settings
+        self.roomba_mode = roomba_mode
+        self.manual_override = False
+        self.last_pinch_time = 0
+        self.pinch_cooldown = 2.0  # reduced from 5.0 to make toggling more responsive 
+        self.collision_response_state = None  # None, 'reversing', 'turning'
+        self.collision_start_time = 0
+        self.collision_duration = 1.0  # seconds to complete collision response
+        self.turn_angle = np.pi / 6  # 30 degrees in radians
+        self.reverse_distance = 0.1  # distance to reverse after collision
+        self.roomba_speed = 0.12  # slower roomba speed
+        
+        # create visualization window
+        self.window_size = (400, 400)  # pixels
+        self.viz_window = np.zeros((self.window_size[0], self.window_size[1], 3), dtype=np.uint8)
+        cv2.namedWindow('robot simulator')
+        
+        # initialize metrics logger
+        self.metrics_logger = GestureLatencyLogger()
+        
+        print("robot simulator initialized")
+        print(f"starting position: {self.position}")
+        if roomba_mode:
+            print("roomba mode enabled")
+            self.robot_speed = self.roomba_speed  # default roomba speed
+        
     def add_environment_objects(self):
         """Add obstacles and targets to the environment"""
         # Add some obstacles (represented as rectangles)
@@ -107,20 +141,24 @@ class WheeledRobotSimulator:
 
     def _check_collision(self) -> bool:
         """check if robot has collided with any obstacles or boundaries"""
+        return self._check_collision_at_position(self.robot_pos[0], self.robot_pos[1])
+
+    def _check_collision_at_position(self, x: float, y: float) -> bool:
+        """check if a specific position would cause a collision with obstacles or boundaries"""
         # check boundary collisions
-        if (abs(self.robot_pos[0]) + self.robot_radius > 5 or 
-            abs(self.robot_pos[1]) + self.robot_radius > 5):
+        if (abs(x) + self.robot_radius > 5 or 
+            abs(y) + self.robot_radius > 5):
             return True
         
         # check obstacle collisions
         for obs in self.obstacles:
             # get the closest point on the obstacle to the robot
-            closest_x = np.clip(self.robot_pos[0], obs[0], obs[0] + obs[2])
-            closest_y = np.clip(self.robot_pos[1], obs[1], obs[1] + obs[3])
+            closest_x = np.clip(x, obs[0], obs[0] + obs[2])
+            closest_y = np.clip(y, obs[1], obs[1] + obs[3])
             
             # calculate distance from robot to closest point
-            distance = np.sqrt((self.robot_pos[0] - closest_x)**2 + 
-                              (self.robot_pos[1] - closest_y)**2)
+            distance = np.sqrt((x - closest_x)**2 + 
+                              (y - closest_y)**2)
             
             if distance < self.robot_radius:
                 return True
@@ -130,33 +168,49 @@ class WheeledRobotSimulator:
     def execute_command(self, commands):
         """
         Execute robot commands from both hands
-        
-        commands format:
-        List[RobotCommand] where each command can be:
-        RobotCommand(
-            action="velocity" | "rotate" | "grip",
-            params={
-                "speed": float      # for velocity (0-1)
-                "angle": float      # for rotate
-                "grip_state": bool  # for grip (can be used for auxiliary actions)
-            }
-        )
         """
-        current_time = time.time()
-        
-        # check for collision and handle reset
-        if self._check_collision() and not self.is_resetting:
-            if current_time - self.last_collision_time > self.collision_cooldown:
-                self.is_resetting = True
-                self.reset_start_time = current_time
-                self.robot_speed = 0
-                self.robot_angular_vel = 0
-                print("Collision detected! Resetting robot...")
-        
-        # process commands from both hands
+        # in roomba mode, check for dual-pinch manual override
+        if self.roomba_mode:
+            for command in commands:
+                if command and command.action == "stop" and command.params.get("dual_pinch", False):
+                    if command.params.get("toggle_override", False):
+                        # log gesture recognition
+                        gesture_data = self.metrics_logger.log_gesture(
+                            "dual_pinch_toggle",
+                            command.params
+                        )
+                        
+                        self.manual_override = not self.manual_override
+                        if self.manual_override:
+                            print("Manual override enabled - stopping roomba behavior")
+                            self.robot_speed = 0  # stop the robot when entering manual override
+                            self.robot_angular_vel = 0
+                        else:
+                            print("Returning to roomba mode")
+                            self.robot_speed = self.roomba_speed  # reset to roomba speed
+                            self.robot_angular_vel = 0
+                        
+                        # log control execution
+                        latency = self.metrics_logger.log_control(gesture_data)
+                        print(f"Gesture to control latency: {latency:.2f}ms")
+            
+            # if not in manual override, perform roomba behavior and return
+            if not self.manual_override:
+                self._update_roomba_mode()
+                self._update_visualization()
+                return
+            # in manual override, continue to process other commands
+
+        # process all commands in gesture mode or when manual override is enabled
         for command in commands:
             if command is None:
                 continue
+            
+            # log gesture recognition
+            gesture_data = self.metrics_logger.log_gesture(
+                command.action,
+                command.params
+            )
             
             if command.action == "velocity":
                 # Set speed directly from right hand with sigmoid smoothing
@@ -166,14 +220,13 @@ class WheeledRobotSimulator:
                 
             elif command.action == "rotate":
                 # Direct control of rotation from left hand
-                # map angle from [-1, 1] to [-pi/4, pi/4] for smoother rotation
                 angle = command.params["angle"]
-                self.robot_angular_vel = angle * (np.pi / 4)  # max rotation speed of pi/4 rad/s
+                self.robot_angular_vel = angle * (np.pi / 4)
                 print(f"Rotating with angular velocity: {self.robot_angular_vel:.2f}")
                 
-            elif command.action == "grip":
-                # For wheeled robot, we'll use this as a "stop/go" command
-                stop = command.params["grip_state"]
+            elif command.action == "stop":
+                # For wheeled robot, this is a stop/go command
+                stop = command.params["stop"]
                 if stop:
                     self.robot_speed = 0
                     self.robot_angular_vel = 0
@@ -181,10 +234,106 @@ class WheeledRobotSimulator:
                 else:
                     self.robot_speed = 0.1
                     print("Robot moving")
-    
+            
+            # log control execution
+            latency = self.metrics_logger.log_control(gesture_data)
+            print(f"Gesture to control latency: {latency:.2f}ms")
+        
+        # update visualization
+        self._update_visualization()
+
+    def normalize_angle(self, angle):
+        """Normalize angle to be in range [-pi, pi]"""
+        return ((angle + np.pi) % (2 * np.pi)) - np.pi
+        
+    def close(self):
+        """Clean up resources"""
+        plt.ioff()
+        plt.close(self.fig)
+        cv2.destroyAllWindows()
+
+    def _generate_random_target(self):
+        """Generate a new random target position that doesn't overlap with obstacles or boundaries"""
+        while True:
+            # Generate random position within bounds
+            x = np.random.uniform(-4.5, 4.5)
+            y = np.random.uniform(-4.5, 4.5)
+            
+            # Check if it overlaps with any obstacles
+            overlaps = False
+            for obs in self.obstacles:
+                obs_x, obs_y, w, h = obs
+                if (abs(x - obs_x) < w/2 + self.target_radius and 
+                    abs(y - obs_y) < h/2 + self.target_radius):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                return np.array([x, y])
+
+    def _update_roomba_mode(self):
+        """update robot behavior in roomba mode"""
+        if not self.roomba_mode or self.manual_override:
+            return
+            
+        current_time = time.time()
+        
+        # handle collision response states
+        if self.collision_response_state:
+            elapsed = current_time - self.collision_start_time
+            
+            if self.collision_response_state == 'reversing':
+                # reverse for half the collision duration
+                if elapsed < self.collision_duration / 2:
+                    self.robot_speed = -self.roomba_speed  # reverse at roomba speed
+                    self.robot_angular_vel = 0
+                else:
+                    # start turning
+                    self.collision_response_state = 'turning'
+                    # randomly choose turn direction
+                    self.turn_direction = 1 if np.random.random() > 0.5 else -1
+                    self.robot_speed = 0
+                    self.robot_angular_vel = self.turn_direction * self.turn_angle / (self.collision_duration / 2)  # turn exactly 30 degrees
+                    
+            elif self.collision_response_state == 'turning':
+                # complete the turn
+                if elapsed < self.collision_duration:
+                    self.robot_speed = 0
+                else:
+                    # return to normal operation
+                    self.collision_response_state = None
+                    self.robot_speed = self.roomba_speed
+                    self.robot_angular_vel = 0
+                    
+        else:
+            # normal operation - move forward
+            self.robot_speed = self.roomba_speed
+            self.robot_angular_vel = 0
+            
+            # check for collision
+            if self._check_collision():
+                self.collision_response_state = 'reversing'
+                self.collision_start_time = current_time
+                print("Collision detected! Reversing and turning...")
+
     def update_animation(self, frame):
         """Update the robot position and orientation based on current state"""
         current_time = time.time()
+        
+        # autonomously update roomba behavior if in roomba mode
+        if self.roomba_mode and not self.manual_override:
+            self._update_roomba_mode()
+        
+        # check for collisions
+        if self._check_collision():
+            if self.manual_override:
+                # in manual override, just print collision but allow movement
+                print("Collision detected in manual override mode!")
+            else:
+                # in roomba mode, handle collision response
+                self.collision_response_state = 'reversing'
+                self.collision_start_time = current_time
+                print("Collision detected! Reversing and turning...")
         
         # check if robot reached target
         distance_to_target = np.linalg.norm(self.robot_pos - self.target_center)
@@ -247,6 +396,21 @@ class WheeledRobotSimulator:
         new_x = self.robot_pos[0] + self.robot_speed * np.cos(self.robot_heading)
         new_y = self.robot_pos[1] + self.robot_speed * np.sin(self.robot_heading)
         
+        # Check for collisions with new position
+        if self._check_collision_at_position(new_x, new_y):
+            if self.manual_override:
+                # in manual override, allow rotation but prevent moving through obstacles
+                # keep the current position but allow rotation
+                new_x = self.robot_pos[0]
+                new_y = self.robot_pos[1]
+                print("Collision detected in manual override mode - preventing movement through obstacle")
+            else:
+                # in roomba mode, handle collision response
+                self.collision_response_state = 'reversing'
+                self.collision_start_time = current_time
+                print("Collision detected! Reversing and turning...")
+                return self.robot_body, self.direction_indicator, self.trail
+        
         # Simple boundary checking
         new_x = np.clip(new_x, -5, 5)
         new_y = np.clip(new_y, -5, 5)
@@ -275,37 +439,30 @@ class WheeledRobotSimulator:
             xs, ys = zip(*self.trail_points)
             self.trail.set_data(xs, ys)
         
-        # Simulate physics - gradually decrease speed and angular velocity
-        self.robot_speed *= 0.98  # Gradual slowdown due to friction
-        self.robot_angular_vel *= 0.95  # Gradual angular slowdown
+        # update cv2 window for visualization
+        self._update_visualization()
         
         # Return artists that were updated
         return self.robot_body, self.direction_indicator, self.trail
     
-    def normalize_angle(self, angle):
-        """Normalize angle to be in range [-pi, pi]"""
-        return ((angle + np.pi) % (2 * np.pi)) - np.pi
+    def _update_visualization(self):
+        """update the robot visualization"""
+        # clear the window
+        self.viz_window.fill(0)
         
-    def close(self):
-        """Clean up resources"""
-        plt.ioff()
-        plt.close(self.fig)
+        # convert normalized coordinates to pixel coordinates
+        px = int(self.robot_pos[0] * self.window_size[0])
+        py = int(self.robot_pos[1] * self.window_size[1])
+        
+        # draw robot
+        cv2.circle(self.viz_window, (px, py), 10, (0, 255, 0), -1)  # green circle for robot
+        
+        # draw direction indicator
+        direction_length = 20
+        dx = int(np.cos(self.robot_heading) * direction_length)
+        dy = int(np.sin(self.robot_heading) * direction_length)
+        cv2.line(self.viz_window, (px, py), (px + dx, py + dy), (0, 255, 0), 2)
 
-    def _generate_random_target(self):
-        """Generate a new random target position that doesn't overlap with obstacles or boundaries"""
-        while True:
-            # Generate random position within bounds
-            x = np.random.uniform(-4.5, 4.5)
-            y = np.random.uniform(-4.5, 4.5)
-            
-            # Check if it overlaps with any obstacles
-            overlaps = False
-            for obs in self.obstacles:
-                obs_x, obs_y, w, h = obs
-                if (abs(x - obs_x) < w/2 + self.target_radius and 
-                    abs(y - obs_y) < h/2 + self.target_radius):
-                    overlaps = True
-                    break
-            
-            if not overlaps:
-                return np.array([x, y]) 
+        # show the window
+        cv2.imshow('robot simulator', self.viz_window)
+        cv2.waitKey(1) 
