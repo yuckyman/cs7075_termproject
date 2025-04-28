@@ -12,6 +12,7 @@ websockets  # for swift simulator
 asyncio  # for event loop handling
 nest_asyncio  # for handling nested event loops
 vpython  # for 3d visualization
+psutil  # for system metrics
 
 # Development dependencies
 pytest-cov

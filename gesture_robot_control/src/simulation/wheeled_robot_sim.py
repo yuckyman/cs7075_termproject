@@ -5,6 +5,7 @@ import time
 from matplotlib.animation import FuncAnimation
 import cv2
 from metrics.gesture_latency_logger import GestureLatencyLogger
+from metrics.system_metrics_logger import SystemMetricsLogger
 
 class WheeledRobotSimulator:
     def __init__(self, roomba_mode=False):
@@ -18,11 +19,18 @@ class WheeledRobotSimulator:
         self.ax.set_xlabel('X position')
         self.ax.set_ylabel('Y position')
         
+        # Differential drive parameters
+        self.wheelbase = 0.2  # distance between wheels in meters
+        self.wheel_radius = 0.05  # radius of wheels in meters
+        self.max_wheel_speed = 0.5  # maximum speed of each wheel in m/s
+        
+        # Wheel speeds (left and right)
+        self.left_wheel_speed = 0.0
+        self.right_wheel_speed = 0.0
+        
         # Robot state
         self.robot_pos = np.array([0.0, 0.0])  # x, y position
         self.robot_heading = 0.0  # heading in radians
-        self.robot_speed = 0.0  # current speed
-        self.robot_angular_vel = 0.0  # current angular velocity
         self.robot_radius = 0.3  # robot radius for visualization
         self.trail_points = []  # store path history
         self.max_trail_length = 100  # maximum number of trail points
@@ -74,18 +82,13 @@ class WheeledRobotSimulator:
             self.fig, 
             self.update_animation, 
             interval=50,  # update every 50 ms 
-            blit=False
+            blit=False,
+            save_count=1000  # limit cache to 1000 frames
         )
         
         # Show the plot without blocking
         plt.ion()
         plt.show()
-        
-        # initialize robot state
-        self.position = np.array([0.5, 0.5])  # x, y position (normalized coordinates)
-        self.angle = 0.0  # current angle in radians
-        self.robot_speed = 0.0  # current speed (0-1)
-        self.robot_angular_vel = 0.0  # current angular velocity
         
         # roomba mode settings
         self.roomba_mode = roomba_mode
@@ -100,19 +103,22 @@ class WheeledRobotSimulator:
         self.roomba_speed = 0.12  # slower roomba speed
         
         # create visualization window
-        self.window_size = (400, 400)  # pixels
+        self.window_size = (400, 400)
         self.viz_window = np.zeros((self.window_size[0], self.window_size[1], 3), dtype=np.uint8)
         cv2.namedWindow('robot simulator')
         
-        # initialize metrics logger
+        # initialize metrics loggers
         self.metrics_logger = GestureLatencyLogger()
+        self.system_metrics_logger = SystemMetricsLogger()
         
         print("robot simulator initialized")
-        print(f"starting position: {self.position}")
+        print(f"starting position: {self.robot_pos}")
         if roomba_mode:
             print("roomba mode enabled")
-            self.robot_speed = self.roomba_speed  # default roomba speed
-        
+            # set initial wheel speeds for roomba mode
+            self.left_wheel_speed = self.roomba_speed
+            self.right_wheel_speed = self.roomba_speed
+
     def add_environment_objects(self):
         """Add obstacles and targets to the environment"""
         # Add some obstacles (represented as rectangles)
@@ -165,6 +171,30 @@ class WheeledRobotSimulator:
             
         return False
 
+    def _compute_differential_velocities(self):
+        """Convert wheel speeds to robot velocities using differential drive kinematics"""
+        # linear velocity = average of wheel speeds
+        linear_vel = (self.left_wheel_speed + self.right_wheel_speed) / 2
+        
+        # angular velocity = difference in wheel speeds / wheelbase
+        angular_vel = (self.right_wheel_speed - self.left_wheel_speed) / self.wheelbase
+        
+        return linear_vel, angular_vel
+
+    def _compute_wheel_speeds(self, linear_vel, angular_vel):
+        """Convert desired robot velocities to wheel speeds"""
+        # left wheel speed = linear velocity - (angular velocity * wheelbase/2)
+        left_speed = linear_vel - (angular_vel * self.wheelbase / 2)
+        
+        # right wheel speed = linear velocity + (angular velocity * wheelbase/2)
+        right_speed = linear_vel + (angular_vel * self.wheelbase / 2)
+        
+        # clamp to max wheel speed
+        left_speed = np.clip(left_speed, -self.max_wheel_speed, self.max_wheel_speed)
+        right_speed = np.clip(right_speed, -self.max_wheel_speed, self.max_wheel_speed)
+        
+        return left_speed, right_speed
+
     def execute_command(self, commands):
         """
         Execute robot commands from both hands
@@ -183,12 +213,12 @@ class WheeledRobotSimulator:
                         self.manual_override = not self.manual_override
                         if self.manual_override:
                             print("Manual override enabled - stopping roomba behavior")
-                            self.robot_speed = 0  # stop the robot when entering manual override
-                            self.robot_angular_vel = 0
+                            self.left_wheel_speed = 0
+                            self.right_wheel_speed = 0
                         else:
                             print("Returning to roomba mode")
-                            self.robot_speed = self.roomba_speed  # reset to roomba speed
-                            self.robot_angular_vel = 0
+                            self.left_wheel_speed = self.roomba_speed
+                            self.right_wheel_speed = self.roomba_speed
                         
                         # log control execution
                         latency = self.metrics_logger.log_control(gesture_data)
@@ -213,27 +243,38 @@ class WheeledRobotSimulator:
             )
             
             if command.action == "velocity":
-                # Set speed directly from right hand with sigmoid smoothing
+                # right hand controls linear velocity
                 raw_velocity = command.params["speed"]
-                self.robot_speed = self._sigmoid_velocity(raw_velocity)
-                print(f"Setting speed to: {self.robot_speed:.2f}")
+                linear_vel = self._sigmoid_velocity(raw_velocity)
+                
+                # maintain current angular velocity
+                _, current_angular_vel = self._compute_differential_velocities()
+                
+                # compute new wheel speeds
+                self.left_wheel_speed, self.right_wheel_speed = self._compute_wheel_speeds(
+                    linear_vel, current_angular_vel
+                )
+                print(f"Setting wheel speeds: left={self.left_wheel_speed:.2f}, right={self.right_wheel_speed:.2f}")
                 
             elif command.action == "rotate":
-                # Direct control of rotation from left hand
+                # left hand controls angular velocity
                 angle = command.params["angle"]
-                self.robot_angular_vel = angle * (np.pi / 4)
-                print(f"Rotating with angular velocity: {self.robot_angular_vel:.2f}")
+                angular_vel = angle * (np.pi / 4)
+                
+                # maintain current linear velocity
+                current_linear_vel, _ = self._compute_differential_velocities()
+                
+                # compute new wheel speeds
+                self.left_wheel_speed, self.right_wheel_speed = self._compute_wheel_speeds(
+                    current_linear_vel, angular_vel
+                )
+                print(f"Setting wheel speeds: left={self.left_wheel_speed:.2f}, right={self.right_wheel_speed:.2f}")
                 
             elif command.action == "stop":
-                # For wheeled robot, this is a stop/go command
-                stop = command.params["stop"]
-                if stop:
-                    self.robot_speed = 0
-                    self.robot_angular_vel = 0
-                    print("Robot stopped")
-                else:
-                    self.robot_speed = 0.1
-                    print("Robot moving")
+                # stop both wheels
+                self.left_wheel_speed = 0
+                self.right_wheel_speed = 0
+                print("Robot stopped")
             
             # log control execution
             latency = self.metrics_logger.log_control(gesture_data)
@@ -251,6 +292,7 @@ class WheeledRobotSimulator:
         plt.ioff()
         plt.close(self.fig)
         cv2.destroyAllWindows()
+        self.system_metrics_logger.close()
 
     def _generate_random_target(self):
         """Generate a new random target position that doesn't overlap with obstacles or boundaries"""
@@ -285,30 +327,31 @@ class WheeledRobotSimulator:
             if self.collision_response_state == 'reversing':
                 # reverse for half the collision duration
                 if elapsed < self.collision_duration / 2:
-                    self.robot_speed = -self.roomba_speed  # reverse at roomba speed
-                    self.robot_angular_vel = 0
+                    self.left_wheel_speed = -self.roomba_speed
+                    self.right_wheel_speed = -self.roomba_speed
                 else:
                     # start turning
                     self.collision_response_state = 'turning'
                     # randomly choose turn direction
                     self.turn_direction = 1 if np.random.random() > 0.5 else -1
-                    self.robot_speed = 0
-                    self.robot_angular_vel = self.turn_direction * self.turn_angle / (self.collision_duration / 2)  # turn exactly 30 degrees
+                    self.left_wheel_speed = -self.turn_direction * self.roomba_speed
+                    self.right_wheel_speed = self.turn_direction * self.roomba_speed
                     
             elif self.collision_response_state == 'turning':
                 # complete the turn
                 if elapsed < self.collision_duration:
-                    self.robot_speed = 0
+                    self.left_wheel_speed = -self.turn_direction * self.roomba_speed
+                    self.right_wheel_speed = self.turn_direction * self.roomba_speed
                 else:
                     # return to normal operation
                     self.collision_response_state = None
-                    self.robot_speed = self.roomba_speed
-                    self.robot_angular_vel = 0
+                    self.left_wheel_speed = self.roomba_speed
+                    self.right_wheel_speed = self.roomba_speed
                     
         else:
             # normal operation - move forward
-            self.robot_speed = self.roomba_speed
-            self.robot_angular_vel = 0
+            self.left_wheel_speed = self.roomba_speed
+            self.right_wheel_speed = self.roomba_speed
             
             # check for collision
             if self._check_collision():
@@ -319,6 +362,9 @@ class WheeledRobotSimulator:
     def update_animation(self, frame):
         """Update the robot position and orientation based on current state"""
         current_time = time.time()
+        
+        # log system metrics
+        system_metrics = self.system_metrics_logger.log_metrics()
         
         # autonomously update roomba behavior if in roomba mode
         if self.roomba_mode and not self.manual_override:
@@ -352,8 +398,8 @@ class WheeledRobotSimulator:
             # Reset robot to origin and generate new target
             self.robot_pos = np.array([0.0, 0.0])
             self.robot_heading = 0.0
-            self.robot_speed = 0.0
-            self.robot_angular_vel = 0.0
+            self.left_wheel_speed = 0.0
+            self.right_wheel_speed = 0.0
             self.trail_points = []
             
             # Generate new target position
@@ -380,23 +426,26 @@ class WheeledRobotSimulator:
             if current_time - self.reset_start_time > 1.0:  # 1 second reset time
                 self.robot_pos = np.array([0.0, 0.0])
                 self.robot_heading = 0.0
-                self.robot_speed = 0.0
-                self.robot_angular_vel = 0.0
+                self.left_wheel_speed = 0.0
+                self.right_wheel_speed = 0.0
                 self.is_resetting = False
                 self.last_collision_time = current_time
                 self.trail_points = []  # clear the trail
                 print("Robot reset complete!")
             return self.robot_body, self.direction_indicator, self.trail
         
-        # Update robot position and heading
-        self.robot_heading += self.robot_angular_vel
+        # compute robot velocities from wheel speeds
+        linear_vel, angular_vel = self._compute_differential_velocities()
+        
+        # update heading
+        self.robot_heading += angular_vel
         self.robot_heading = self.normalize_angle(self.robot_heading)
         
-        # Calculate new position based on heading and speed
-        new_x = self.robot_pos[0] + self.robot_speed * np.cos(self.robot_heading)
-        new_y = self.robot_pos[1] + self.robot_speed * np.sin(self.robot_heading)
+        # update position using differential drive kinematics
+        new_x = self.robot_pos[0] + linear_vel * np.cos(self.robot_heading)
+        new_y = self.robot_pos[1] + linear_vel * np.sin(self.robot_heading)
         
-        # Check for collisions with new position
+        # check for collisions with new position
         if self._check_collision_at_position(new_x, new_y):
             if self.manual_override:
                 # in manual override, allow rotation but prevent moving through obstacles
@@ -456,6 +505,21 @@ class WheeledRobotSimulator:
         
         # draw robot
         cv2.circle(self.viz_window, (px, py), 10, (0, 255, 0), -1)  # green circle for robot
+        
+        # draw wheels
+        wheel_offset = int(self.wheelbase * self.window_size[0] / 2)  # convert wheelbase to pixels
+        left_wheel_pos = (
+            int(px - wheel_offset * np.sin(self.robot_heading)),
+            int(py + wheel_offset * np.cos(self.robot_heading))
+        )
+        right_wheel_pos = (
+            int(px + wheel_offset * np.sin(self.robot_heading)),
+            int(py - wheel_offset * np.cos(self.robot_heading))
+        )
+        
+        # draw wheels as circles
+        cv2.circle(self.viz_window, left_wheel_pos, 5, (255, 0, 0), -1)  # blue for left wheel
+        cv2.circle(self.viz_window, right_wheel_pos, 5, (0, 0, 255), -1)  # red for right wheel
         
         # draw direction indicator
         direction_length = 20
