@@ -188,10 +188,6 @@ class HandTracker:
                     direction_changes += 1
                 prev_direction = current_direction
                 
-        # Conditions for wave:
-        # 1. Significant motion in fingertips
-        # 2. Multiple direction changes (oscillation)
-        # 3. Palm relatively stable (checked earlier)
         return total_motion > 500 and direction_changes > 6
     
     def _is_pointing(self, landmarks: List[Tuple[int, int]]) -> bool:
@@ -216,9 +212,6 @@ class HandTracker:
             'pinky': np.linalg.norm(np.array(pinky_tip) - palm_center)
         }
         
-        # more forgiving thresholds:
-        # - index only needs to be moderately extended (>120 instead of 150)
-        # - other fingers can be slightly more open (<120 instead of 100)
         return (distances['index'] > 120 and 
                 all(d < 120 for k, d in distances.items() if k != 'index'))
     
@@ -242,19 +235,9 @@ class HandTracker:
         ring_dist = np.linalg.norm(np.array(ring_tip) - np.array(wrist))
         pinky_dist = np.linalg.norm(np.array(pinky_tip) - np.array(wrist))
         
-        # check if hand is flipped (thumb on right side)
-        thumb_right = thumb_tip[0] > wrist[0]  # thumb x > wrist x means thumb is on right side
         
         # determine hand side based on pixel x coordinate relative to frame width
         hand_side = "left" if landmarks[0][0] < self.frame_width / 2 else "right"
-        
-        # check for thumbs down (thumb extended down, other fingers closed)
-        if (thumb_dist > 0.8 and  # thumb extended
-            index_dist < 0.5 and  # other fingers closed
-            middle_dist < 0.5 and
-            ring_dist < 0.5 and
-            pinky_dist < 0.5):
-            return "thumbs_down"
 
         # check for pinch (thumb and index close)
         if (np.linalg.norm(np.array(thumb_tip) - np.array(index_tip)) < 50 and
@@ -275,7 +258,7 @@ class HandTracker:
     
     def _detect_dynamic_gesture(self, hand_side: str) -> Optional[str]:
         """detect dynamic gestures based on motion history"""
-        # need enough history for dynamic gestures
+
         if len(self.hand_histories[hand_side]['index_tip']) < self.motion_history_size:
             return None
             
@@ -288,97 +271,6 @@ class HandTracker:
         index_positions = np.array(list(self.hand_histories[hand_side]['index_tip']))
         palm_positions = np.array(list(self.hand_histories[hand_side]['palm']))
         
-        # compute motion metrics
-        index_motion = np.diff(index_positions, axis=0)
-        total_distance = np.sum(np.linalg.norm(index_motion, axis=1))
-        
-        # detect horizontal swipe
-        x_motion = index_positions[-1][0] - index_positions[0][0]
-        y_motion = index_positions[-1][1] - index_positions[0][1]
-        
-        if total_distance > 150:  # reduced from 200 - more sensitive to general motion
-            # check for swipe gestures
-            if abs(x_motion) > 100 and abs(y_motion) < 120:  # reduced horizontal requirement, increased vertical tolerance
-                self.last_dynamic_gesture_time = current_time
-                return "swipe_right" if x_motion > 0 else "swipe_left"
-                
-            # check for circle gesture
-            elif self._is_circular_motion(index_positions):
-                self.last_dynamic_gesture_time = current_time
-                return "circle"
-                
-            # check for wave gesture
-            elif self._is_wave_motion(index_positions):
-                self.last_dynamic_gesture_time = current_time
-                return "wave"
-                
-        return None
-    
-    def _is_circular_motion(self, positions: np.ndarray) -> bool:
-        """detect if motion forms a rough circle"""
-        if len(positions) < self.motion_history_size:
-            return False
-            
-        # center the positions
-        centered = positions - np.mean(positions, axis=0)
-        
-        # fit a circle
-        x, y = centered[:, 0], centered[:, 1]
-        r = np.mean(np.sqrt(x**2 + y**2))
-        
-        # check if points roughly form a circle
-        distances = np.abs(np.sqrt(x**2 + y**2) - r)
-        # more forgiving circle detection
-        return np.mean(distances) < 40 and np.std(distances) < 25  # increased from 30/20
-    
-    def _is_wave_motion(self, positions: np.ndarray) -> bool:
-        """detect if motion forms a waving pattern"""
-        if len(positions) < self.motion_history_size:
-            return False
-            
-        # look at vertical motion
-        y_positions = positions[:, 1]
-        peaks = 0
-        direction = 0  # 0=unknown, 1=up, -1=down
-        
-        for i in range(1, len(y_positions)):
-            if y_positions[i] > y_positions[i-1] and direction <= 0:
-                direction = 1
-                peaks += 1
-            elif y_positions[i] < y_positions[i-1] and direction >= 0:
-                direction = -1
-                peaks += 1
-                
-        return peaks >= 4  # at least 2 full waves
-    
-    def draw_info(self, frame: np.ndarray, gesture: Optional[str]) -> np.ndarray:
-        """
-        draw gesture information and motion trail on frame
-        """
-        if gesture:
-            cv2.putText(
-                frame,
-                f"Gesture: {gesture}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2
-            )
-            
-        # draw motion trail whenever pointing, regardless of dynamic gestures
-        for hand, history in self.hand_histories.items():
-            if history['is_pointing'] and len(history['index_tip']) > 1:
-                points = np.array(list(history['index_tip']))
-                for i in range(1, len(points)):
-                    thickness = int((i / len(points)) * 4) + 1
-                    cv2.line(frame, 
-                            tuple(points[i-1]), 
-                            tuple(points[i]),
-                            (0, 0, 255),
-                            thickness)
-                
-        return frame 
 
     def _calculate_pointer_angle(self, landmarks: List[Tuple[int, int]]) -> float:
         """calculate the angle of the pointer finger relative to vertical"""

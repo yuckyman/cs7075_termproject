@@ -9,7 +9,7 @@ from metrics.system_metrics_logger import SystemMetricsLogger
 
 class WheeledRobotSimulator:
     def __init__(self, roomba_mode=False):
-        # Set up the simulation environment
+        # set up the simulation environment
         self.fig, self.ax = plt.subplots(figsize=(10, 8))
         self.ax.set_xlim(-5, 5)
         self.ax.set_ylim(-5, 5)
@@ -19,40 +19,40 @@ class WheeledRobotSimulator:
         self.ax.set_xlabel('X position')
         self.ax.set_ylabel('Y position')
         
-        # Differential drive parameters
+        # differential drive parameters
         self.wheelbase = 0.2  # distance between wheels in meters
         self.wheel_radius = 0.05  # radius of wheels in meters
         self.max_wheel_speed = 0.5  # maximum speed of each wheel in m/s
         
-        # Wheel speeds (left and right)
+        # wheel speeds (left and right)
         self.left_wheel_speed = 0.0
         self.right_wheel_speed = 0.0
         
-        # Robot state
+        # robot state
         self.robot_pos = np.array([0.0, 0.0])  # x, y position
         self.robot_heading = 0.0  # heading in radians
         self.robot_radius = 0.3  # robot radius for visualization
         self.trail_points = []  # store path history
         self.max_trail_length = 100  # maximum number of trail points
         
-        # Collision detection
+        # collision detection
         self.last_collision_time = 0
         self.collision_cooldown = 1.0  # seconds before allowing another collision
         self.is_resetting = False
         self.reset_start_time = 0
         
-        # Celebration state
+        # celebration state
         self.is_celebrating = False
         self.celebration_start_time = 0
         self.celebration_duration = 2.0  # seconds
         self.celebration_radius = 0.5  # radius of celebration circle
         self.celebration_circle = None
         
-        # Target state
+        # target state
         self.target_center = np.array([4, 4])  # initial target position
         self.target_radius = 0.5
         
-        # Draw the robot
+        # draw the robot
         self.robot_body = Circle(
             (self.robot_pos[0], self.robot_pos[1]), 
             self.robot_radius, 
@@ -60,7 +60,7 @@ class WheeledRobotSimulator:
             alpha=0.7
         )
         
-        # Add direction indicator (shows heading)
+        # add direction indicator (shows heading)
         self.direction_indicator, = self.ax.plot(
             [self.robot_pos[0], self.robot_pos[0] + self.robot_radius * np.cos(self.robot_heading)],
             [self.robot_pos[1], self.robot_pos[1] + self.robot_radius * np.sin(self.robot_heading)],
@@ -68,16 +68,16 @@ class WheeledRobotSimulator:
             linewidth=2
         )
         
-        # Add trail visualization
+        # add trail visualization
         self.trail, = self.ax.plot([], [], 'b-', alpha=0.3)
         
-        # Add objects to the environment
+        # add objects to the environment
         self.add_environment_objects()
         
-        # Add robot to plot
+        # add robot to plot
         self.ax.add_patch(self.robot_body)
         
-        # Animation
+        # animation
         self.animation = FuncAnimation(
             self.fig, 
             self.update_animation, 
@@ -86,7 +86,7 @@ class WheeledRobotSimulator:
             save_count=1000  # limit cache to 1000 frames
         )
         
-        # Show the plot without blocking
+        # show the plot without blocking
         plt.ion()
         plt.show()
         
@@ -121,7 +121,7 @@ class WheeledRobotSimulator:
 
     def add_environment_objects(self):
         """Add obstacles and targets to the environment"""
-        # Add some obstacles (represented as rectangles)
+        # add some obstacles (represented as rectangles)
         self.obstacles = [
             (-4, -3, 1, 1),  # x, y, width, height
             (2, 2, 1.5, 0.5),
@@ -134,7 +134,7 @@ class WheeledRobotSimulator:
             rect = Rectangle((x, y), w, h, color='gray', alpha=0.7)
             self.ax.add_patch(rect)
             
-        # Add a target zone
+        # add a target zone
         self.target = Circle(self.target_center, self.target_radius, color='green', alpha=0.3)
         self.ax.add_patch(self.target)
         
@@ -297,11 +297,11 @@ class WheeledRobotSimulator:
     def _generate_random_target(self):
         """Generate a new random target position that doesn't overlap with obstacles or boundaries"""
         while True:
-            # Generate random position within bounds
+            # generate random position within bounds
             x = np.random.uniform(-4.5, 4.5)
             y = np.random.uniform(-4.5, 4.5)
             
-            # Check if it overlaps with any obstacles
+            # check if it overlaps with any obstacles
             overlaps = False
             for obs in self.obstacles:
                 obs_x, obs_y, w, h = obs
@@ -395,14 +395,14 @@ class WheeledRobotSimulator:
             self.ax.add_patch(self.celebration_circle)
             print("Target reached! Celebrating!")
             
-            # Reset robot to origin and generate new target
+            # reset robot to origin and generate new target
             self.robot_pos = np.array([0.0, 0.0])
             self.robot_heading = 0.0
             self.left_wheel_speed = 0.0
             self.right_wheel_speed = 0.0
             self.trail_points = []
             
-            # Generate new target position
+            # generate new target position
             self.target_center = self._generate_random_target()
             self.target.center = self.target_center
             print(f"New target at: {self.target_center}")
@@ -460,7 +460,7 @@ class WheeledRobotSimulator:
                 print("Collision detected! Reversing and turning...")
                 return self.robot_body, self.direction_indicator, self.trail
         
-        # Simple boundary checking
+        # simple boundary checking
         new_x = np.clip(new_x, -5, 5)
         new_y = np.clip(new_y, -5, 5)
         
